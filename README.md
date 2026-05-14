@@ -1,1 +1,5 @@
-# FSC-MAPSO
+# Inference of Finite State Controllers (FSCs) from behavioral data
+
+This repository contains code for inferring Finite State Controllers (FSCs) from behavioral data, using the MAPSO algorithm (Metric-Adaptive Particle Swarm Optimization), introduced in the preprint "Decoding behavior with minimal and interpretable agent models", G. Nicoletti and A. Celani, bioRxiv, 2026.01.20.700580.
+
+The notebooks contain the code to generate and infer FSCs from synthetic agent (parity check, T-Maze, and chemotatic). The scripts contain the code to infer FSCs from mouse behavioral data in the reversal task (data from C. Beron et al, PNAS 119 (15) e2113961119 2022) and from rats behavioral data for the evidence accumulation task (data from T. Z. Luo, T. D. Kim, D. Gupta et al, Nature 646, 1156–1166 2025). The corresponding notebooks analyze the inferred FSCs with different number of internal states, and compare the generated behavioral observables with the data.
