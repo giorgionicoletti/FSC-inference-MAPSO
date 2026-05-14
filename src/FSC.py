@@ -21,12 +21,65 @@ from environments.base_environment_model import BaseEnvironmentModel
 class FSC:
     def __init__(self, mode,
                  M, A, Y = None,
-                 policy_model = "split",
+                 policy_model = "softmax",
                  policy_params = {"theta": None, "zeta": None},
                  psi = None, seed = None,
                  ObsSpace = None, ActSpace = None, MemSpace = None,
                  init_memory_obs_dependent = False):
-        
+        """
+        Initialize a Finite State Controller (FSC) for either generation or inference.
+
+        Parameters
+        ----------
+        mode : str
+            Operating mode. Must be ``'generation'`` (sample trajectories) or
+            ``'inference'`` (fit parameters to observed trajectories).
+        M : int
+            Number of internal memory states.
+        A : int
+            Number of actions.
+        Y : int
+            Number of discrete observations.
+        policy_model : str, optional
+            Name of the generalized policy parametrization. Currently only
+            ``'softmax'`` is supported.
+        policy_params : dict, optional
+            Dictionary of initial policy parameter arrays. Keys must match the
+            parameter names expected by the chosen policy model (``'theta'`` for
+            memory transitions of shape ``(Y, A, M, M)`` and ``'zeta'`` for the
+            action policy of shape ``(A, M)``). Pass ``None`` for a parameter to
+            have it randomly initialized.
+        psi : np.ndarray or None, optional
+            Logit vector for the initial memory distribution ``rho``. Shape must
+            be ``(M,)`` when ``init_memory_obs_dependent=False``, or ``(Y, M)``
+            when ``init_memory_obs_dependent=True``. Randomly initialized if
+            ``None``.
+        seed : int or None, optional
+            Random seed used when randomly initializing ``psi`` and any ``None``
+            policy parameters.
+        ObsSpace : array-like or None, optional
+            Labels for each observation (length ``Y``). Defaults to
+            ``np.arange(Y)``.
+        ActSpace : array-like or None, optional
+            Labels for each action (length ``A``). Defaults to
+            ``np.arange(A)``.
+        MemSpace : array-like or None, optional
+            Labels for each memory state (length ``M``). Defaults to
+            ``np.arange(M)``.
+        init_memory_obs_dependent : bool, optional
+            If ``True``, the initial memory distribution ``rho`` is conditioned
+            on the first observation (``psi`` has shape ``(Y, M)``). Default is
+            ``False``.
+
+        Raises
+        ------
+        ValueError
+            If ``mode`` is not ``'generation'`` or ``'inference'``.
+        ValueError
+            If ``Y`` is not provided or not a positive integer.
+        ValueError
+            If any provided space array has the wrong length.
+        """
         self.__init_supported_objects()
 
         self.__check_and_init_observations(Y)
@@ -59,16 +112,62 @@ class FSC:
         self.__policy_model_name = policy_model
 
     def get_rho(self):
+        """
+        Return the initial memory distribution ``rho``.
+
+        ``rho`` is derived from ``psi`` via a softmax transformation. When
+        ``init_memory_obs_dependent=True`` the result has shape ``(Y, M)``;
+        otherwise it has shape ``(M,)``.
+
+        Returns
+        -------
+        np.ndarray or torch.Tensor
+            Probability distribution over initial memory states.
+        """
         return self.rho
 
 
     def get_TMat(self):
+        """
+        Return the joint transition matrix ``T(a, m' | m, y)``.
+
+        The matrix encodes the probability of jointly choosing action ``a`` and
+        transitioning to memory state ``m'``, given the current memory ``m`` and
+        observation ``y``. The returned shape is ``(Y, M, M, A)``, where axes
+        are ``(obs, prev_mem, next_mem, action)``.
+
+        Returns
+        -------
+        np.ndarray
+            In ``'generation'`` mode: NumPy array of shape ``(Y, M, M, A)``.
+        torch.Tensor
+            In ``'inference'`` mode: PyTorch tensor of shape ``(Y, M, M, A)``.
+        """
         if self.mode == 'generation':
             return self.GPModel.get_TMat_numpy().transpose(0, 2, 3, 1)
         elif self.mode == 'inference':
             return self.GPModel.get_TMat_torch().permute(0, 2, 3, 1)
             
     def get_action_policy(self, obs = None):
+        """
+        Return the marginal action policy ``pi(a | m)``.
+
+        In the ``'softmax'`` parametrization the action policy is
+        observation-independent, so the ``obs`` argument is accepted for
+        interface consistency but is not used.
+
+        Parameters
+        ----------
+        obs : optional
+            Not used. Providing a value raises a warning.
+
+        Returns
+        -------
+        np.ndarray
+            In ``'generation'`` mode: array of shape ``(M, A)``.
+        torch.Tensor
+            In ``'inference'`` mode: tensor of shape ``(M, A)``.
+        """
         if obs is not None:
             raise Warning("Explicit observation values are not used in the policy model for discrete observations.")
         if self.mode == 'generation':
@@ -77,6 +176,26 @@ class FSC:
             return self.inferencer.get_action_policy()
             
     def get_memory_transitions(self, obs = None):
+        """
+        Return the memory transition matrix ``g(m' | a, m, y)``.
+
+        Gives the probability of moving to memory ``m'`` given the current
+        memory ``m``, action ``a``, and observation ``y``. The ``obs`` argument
+        is accepted for interface consistency but is not used in the current
+        ``'softmax'`` parametrization.
+
+        Parameters
+        ----------
+        obs : optional
+            Not used. Providing a value raises a warning.
+
+        Returns
+        -------
+        np.ndarray
+            In ``'generation'`` mode: array of shape ``(Y, A, M, M)``.
+        torch.Tensor
+            In ``'inference'`` mode: tensor of shape ``(Y, A, M, M)``.
+        """
         if obs is not None:
             raise Warning("Explicit observation values are not used in the policy model for discrete observations.")
         if self.mode == 'generation':
@@ -86,6 +205,24 @@ class FSC:
                         
     def save(self, directory, filename = None,
              custom_postname = ""):
+        """
+        Serialize the FSC object to a pickle file.
+
+        If ``filename`` is not provided, an automatic name is built from the
+        policy model name, the dimensions ``M``, ``A``, ``Y``, the best
+        training loss (when trained), and an optional custom suffix.
+
+        Parameters
+        ----------
+        directory : str
+            Target directory. Created recursively if it does not exist.
+        filename : str or None, optional
+            Output filename (without or with ``.pkl`` extension). Auto-
+            generated when ``None``.
+        custom_postname : str, optional
+            Additional suffix appended to the auto-generated filename before
+            the ``.pkl`` extension.
+        """
         if filename is None:
             filename = f"FSC_discrete_{self.__policy_model_name}_M{self.M}_A{self.A}"
             filename += f"_Y{self.Y}"
@@ -121,6 +258,26 @@ class FSC:
     ##############################################################################################################################
 
     def set_mode(self, mode):
+        """
+        Switch the FSC between ``'generation'`` and ``'inference'`` modes.
+
+        When switching to ``'generation'``, all PyTorch parameters are detached
+        and converted to NumPy arrays, and a fresh ``GenerationDiscreteObs``
+        instance is created. Previously loaded observations (stored in
+        ``_fitted_observations_numpy``) are forwarded to the new generator.
+        When switching to ``'inference'``, a fresh ``InferenceDiscreteObs``
+        instance is created.
+
+        Parameters
+        ----------
+        mode : str
+            Target mode. Must be ``'generation'`` or ``'inference'``.
+
+        Raises
+        ------
+        ValueError
+            If ``mode`` is not ``'generation'`` or ``'inference'``.
+        """
         if mode not in ['generation', 'inference']:
             raise ValueError("Mode must be either 'generation' or 'inference'")
         
@@ -156,6 +313,19 @@ class FSC:
         self.mode = mode
 
     def convert_observations_to_numpy(self):
+        """
+        Convert the internally stored observation trajectories back to NumPy
+        arrays in the original (external) observation space.
+
+        The converted sequences are stored in ``_fitted_observations_numpy`` and
+        can subsequently be passed to a ``GenerationDiscreteObs`` instance after
+        a mode switch from ``'inference'`` to ``'generation'``.
+
+        Raises
+        ------
+        ValueError
+            If no inference trajectories have been loaded yet.
+        """
         if not self.__loaded_trajectories_inference:
             raise ValueError("No trajectories to fit have been loaded.")
         
@@ -173,6 +343,23 @@ class FSC:
     ##############################################################################################################################
 
     def compute_loss(self, trajectories):
+        """
+        Compute the mean negative log-likelihood over a set of trajectories.
+
+        Works in both ``'generation'`` mode (NumPy forward pass) and
+        ``'inference'`` mode (PyTorch forward pass without gradient tracking).
+
+        Parameters
+        ----------
+        trajectories : list of dict
+            Each dictionary must contain the keys ``'observations'`` and
+            ``'actions'`` with array-like values of equal length.
+
+        Returns
+        -------
+        float
+            Mean negative log-likelihood across all trajectories.
+        """
         nLL = 0.0
 
         if self.mode == 'inference':
@@ -192,6 +379,29 @@ class FSC:
         return nLL / len(trajectories)
     
     def evaluate_nloglikelihood_for_trajectory(self, trajectory_idx):
+        """
+        Evaluate the negative log-likelihood for a single loaded trajectory.
+
+        Only available in ``'inference'`` mode after trajectories have been
+        loaded via ``load_trajectories_tofit``.
+
+        Parameters
+        ----------
+        trajectory_idx : int
+            Index into the list of loaded trajectories.
+
+        Returns
+        -------
+        float
+            Negative log-likelihood of the specified trajectory.
+
+        Raises
+        ------
+        ValueError
+            If the current mode is not ``'inference'``.
+        ValueError
+            If no trajectories have been loaded.
+        """
         if self.mode != 'inference':
             raise ValueError("Mode must be 'inference' to evaluate the negative log-likelihood.")
         if not self.__loaded_trajectories_inference:
@@ -207,12 +417,33 @@ class FSC:
     ##############################################################################################################################
 
     def reset_trained_status(self):
+        """
+        Reset the ``trained`` flag to ``False``.
+
+        Useful when re-running inference on an already-trained FSC without
+        creating a new instance.
+        """
         self.__trained = False
     
     def set_trained_status(self, val):
+        """
+        Manually override the ``trained`` flag.
+
+        Parameters
+        ----------
+        val : bool
+            New value for the ``trained`` flag.
+        """
         self.__trained = val
 
     def initialize_for_inference(self):
+        """
+        Prepare the FSC for a new inference run.
+
+        Switches the mode to ``'inference'`` and resets the flag that tracks
+        whether trajectories have been loaded, so that a fresh set of
+        trajectories can be provided.
+        """
         self.set_mode('inference')
         self.__loaded_trajectories_inference = False
 
@@ -234,7 +465,120 @@ class FSC:
                              maxiter_ccopt = 1000, rho0_ccopt = None,
                              th_ccopt = 1e-6, c_gauge_ccopt = 0,
                              print_params = True):
+        """
+        Configure and validate the inference hyper-parameters before calling ``fit``.
 
+        The optimization pipeline supports three optional stages, which can be
+        combined freely:
+
+        1. **MAPSO** — Modified Adaptive Particle Swarm Optimization over the
+           full parameter space (global or local-best kNN topology).
+        2. **Gradient descent** — Adam or SGD optimizer with a learning-rate
+           scheduler, applied after (or instead of) MAPSO.
+        3. **Convex–concave optimization (ccopt)** — an alternative analytical
+           solver for the initial memory distribution ``rho`` only.
+
+        The validated parameters are stored in ``self.inference_params`` and
+        consumed by ``fit``.
+
+        Parameters
+        ----------
+        use_gradient : bool, optional
+            Enable the gradient-descent stage. Default ``True``.
+        use_MAPSO : bool, optional
+            Enable the MAPSO stage. Default ``True``.
+        use_ccopt : bool, optional
+            Enable the convex–concave optimization stage. Default ``False``.
+        trainable_parameters : str or list of str, optional
+            Which parameters to optimize. Use ``'all'`` to train everything,
+            ``'elementwise_mask'`` to supply a Boolean mask per parameter, or a
+            list of parameter name strings (e.g. ``['theta', 'psi']``).
+            Default ``'all'``.
+        trainable_mask : dict or None, optional
+            Required when ``trainable_parameters='elementwise_mask'``. Keys
+            are parameter names; values are Boolean NumPy arrays (or tensors)
+            of the same shape as the corresponding parameter.
+        NEpochs_gradient : int or None
+            Number of gradient-descent epochs. Required when
+            ``use_gradient=True``.
+        NBatch_gradient : int or None
+            Mini-batch size for gradient descent (number of trajectories per
+            gradient step). Required when ``use_gradient=True``.
+        lr_gradient : float or None
+            Initial learning rate. Required when ``use_gradient=True``.
+        optimizer_gradient : str, optional
+            Optimizer name. Supported values: ``'ADAM'``, ``'SGD'``.
+            Default ``'ADAM'``.
+        scheduler_gradient : dict, optional
+            Learning-rate scheduler specification. Must contain the key
+            ``'type'`` (``'exponential'`` or ``'fixed'``). For
+            ``'exponential'``, also provide ``'decay_rate'`` (float).
+            Default ``{"type": "exponential", "decay_rate": 0.8}``.
+        train_split_gradient : float, optional
+            Fraction of trajectories used for training; the remainder forms a
+            validation set. Must be in ``(0, 1]``. Default ``1`` (no split).
+        n_particles_MAPSO : int or None
+            Number of PSO particles. Required when ``use_MAPSO=True``.
+        NEpochs_MAPSO : int or None
+            Number of PSO iterations. Required when ``use_MAPSO=True``.
+        init_particles_MAPSO : dict, optional
+            Initial particle distribution specification. Must contain
+            ``'distribution'`` (``'uniform'``, ``'normal'``,
+            ``'multivariate_normal'``, or ``'uniform_with_biases'``) and the
+            corresponding parameters (e.g. ``'xmin'``/``'xmax'`` for
+            ``'uniform'``). Default uniform in ``[-5, 5]``.
+        init_velocities_MAPSO : dict, optional
+            Initial velocity distribution specification. Supports
+            ``'uniform'`` (with ``'vmin'``/``'vmax'``) and ``'normal'``
+            (with ``'mean'``/``'std'``). Default zero velocities.
+        c1_init_MAPSO : float, optional
+            Initial cognitive (personal-best) acceleration coefficient.
+            Default ``2.0``.
+        c2_init_MAPSO : float, optional
+            Initial social (global-best) acceleration coefficient.
+            Default ``2.0``.
+        w_init_MAPSO : float, optional
+            Initial inertia weight. Default ``0.9``.
+        sigma_min_MAPSO : float, optional
+            Minimum mutation standard deviation used in the convergence
+            strategy. Default ``0.1``.
+        sigma_max_MAPSO : float, optional
+            Maximum mutation standard deviation. Default ``1``.
+        dynamic_topology_MAPSO : bool, optional
+            If ``True``, use a local-best kNN topology with a time-varying
+            neighbourhood size instead of the global-best topology.
+            Default ``False``.
+        num_neighbors_init_MAPSO : int or None
+            Initial neighbourhood size. Required when
+            ``dynamic_topology_MAPSO=True``.
+        num_neighbors_final_MAPSO : int or None
+            Final neighbourhood size. Required when
+            ``dynamic_topology_MAPSO=True``.
+        num_neighbors_mid_MAPSO : int or None
+            Neighbourhood size at the midpoint of the run. Required when
+            ``dynamic_topology_MAPSO=True``.
+        maxiter_ccopt : int, optional
+            Maximum number of ccopt iterations. Default ``1000``.
+        rho0_ccopt : np.ndarray or None, optional
+            Starting point for ccopt. Randomly initialized when ``None``.
+        th_ccopt : float, optional
+            Convergence threshold for ccopt. Default ``1e-6``.
+        c_gauge_ccopt : float, optional
+            Gauge constant added to the ccopt objective. Default ``0``.
+        print_params : bool, optional
+            If ``True``, pretty-print the validated parameter dictionary after
+            validation. Default ``True``.
+
+        Raises
+        ------
+        ValueError
+            If both ``use_gradient`` and ``use_MAPSO`` are ``False``.
+        ValueError
+            If ``trainable_parameters`` contains unknown parameter names.
+        AssertionError
+            If required parameters for the enabled optimization stages are
+            not provided.
+        """
 
         self.inference_params = {}
         trainable_params_dict = {}
@@ -506,6 +850,42 @@ class FSC:
                         print()
 
     def fit(self, trajectories, overwrite = True, verbose_MAPSO = True, verbose_epochs_MAPSO = True):
+        """
+        Run the full inference pipeline to fit FSC parameters to observed trajectories.
+
+        Calls ``initialize_for_inference``, loads the trajectories, and then
+        runs the optimization stages configured by ``set_inference_params``
+        (MAPSO and/or gradient descent). When ``overwrite=True`` the optimized
+        parameters are written back into the FSC and the ``trained`` flag is set.
+
+        Parameters
+        ----------
+        trajectories : list of dict
+            Training trajectories. Each dictionary must contain the keys
+            ``'observations'`` and ``'actions'`` with equal-length sequences.
+        overwrite : bool, optional
+            If ``True`` (default), copy the best inferred parameters back to
+            the FSC's policy model and ``psi`` after training.
+        verbose_MAPSO : bool, optional
+            If ``True``, print per-particle MAPSO diagnostics. Default ``True``.
+        verbose_epochs_MAPSO : bool, optional
+            If ``True``, print the best loss at each MAPSO iteration.
+            Default ``True``.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys ``'train'`` (and optionally ``'val'``) mapping
+            to lists of per-epoch negative log-likelihood values.
+
+        Raises
+        ------
+        AssertionError
+            If the FSC has already been trained (call ``reset_trained_status``
+            first to re-train).
+        ValueError
+            If ``set_inference_params`` has not been called yet.
+        """
         assert not self.trained, "The model has already been trained. If you want to train it again, reinitialize it or call the method reset_trained_status()."
 
         self.initialize_for_inference()
@@ -543,6 +923,22 @@ class FSC:
     ##############################################################################################################################
     
     def load_parameters(self, policy_params, psi):
+        """
+        Load externally provided policy parameters and ``psi`` into the FSC.
+
+        Arrays are automatically converted to the type required by the current
+        mode (NumPy for ``'generation'``, PyTorch tensors for ``'inference'``).
+
+        Parameters
+        ----------
+        policy_params : dict
+            Dictionary mapping parameter names (e.g. ``'theta'``, ``'zeta'``)
+            to NumPy arrays or PyTorch tensors of the expected shapes.
+        psi : np.ndarray or torch.Tensor
+            Logit vector for the initial memory distribution. Shape must be
+            ``(M,)`` or ``(Y, M)`` depending on
+            ``init_memory_obs_dependent``.
+        """
 
         self.__check_parameters_consistency(psi)
         self.GPModel._load_params(policy_params)
@@ -566,12 +962,51 @@ class FSC:
         self.psi = psi
 
     def load_observations_for_generation(self, observations):
+        """
+        Load an observation sequence (or list of sequences) for trajectory
+        generation.
+
+        Delegates to ``GenerationDiscreteObs.load_observations``. Only
+        available in ``'generation'`` mode.
+
+        Parameters
+        ----------
+        observations : np.ndarray or list of np.ndarray
+            A single 1-D observation array or a list of such arrays. Every
+            observation value must belong to ``ObsSpace``.
+
+        Raises
+        ------
+        ValueError
+            If the current mode is not ``'generation'``.
+        """
         if self.mode != 'generation':
             raise ValueError("Mode must be 'generation' to load observations.")
 
         self.generator.load_observations(observations)
 
     def load_trajectories_tofit(self, trajectories):
+        """
+        Validate and load a set of observed trajectories for inference.
+
+        Each trajectory is checked for the required ``'observations'`` and
+        ``'actions'`` keys and for equal sequence lengths, then forwarded to
+        the internal ``InferenceDiscreteObs`` object.
+
+        Parameters
+        ----------
+        trajectories : list of dict
+            List of trajectory dictionaries, each with keys ``'observations'``
+            and ``'actions'`` containing equal-length array-like sequences.
+
+        Raises
+        ------
+        ValueError
+            If the current mode is not ``'inference'``.
+        AssertionError
+            If any trajectory is missing required keys or has mismatched
+            sequence lengths.
+        """
 
         if self.mode != 'inference':
             raise ValueError("Mode must be 'inference' to load trajectories to be fitted.")
@@ -598,6 +1033,10 @@ class FSC:
     ##############################################################################################################################
 
     def show_supported(self):
+        """
+        Print all supported policy models, optimizers, schedulers, and particle
+        / velocity distributions.
+        """
         print("=============================")
         print("Supported policy models: ", self.supported_policy_models)
         print("Supported optimizers for gradient descent: ", self.supported_optimizers)
@@ -607,6 +1046,14 @@ class FSC:
         print("=============================")
 
     def show_summary(self):
+        """
+        Print a human-readable summary of the FSC structure and current
+        parameter values.
+
+        Displays the number of memory states, actions, and observations;
+        the policy model name; the current mode; the trained status; and the
+        values of ``psi``, ``rho``, and all policy parameters.
+        """
         print("======================")
         print("=== FSC properties ===")
         print("======================")
@@ -646,6 +1093,55 @@ class FSC:
                                    NSteps=None, observations=None,
                                    idx_observation=None, initial_state=None,
                                    verbose=False):
+        """
+        Generate a single trajectory in ``'generation'`` mode.
+
+        Observations can be supplied in three ways:
+
+        * **Environment model**: pass a ``BaseEnvironmentModel`` instance.
+          The FSC interacts with the environment step-by-step, so ``NSteps``
+          must be provided.
+        * **Explicit observations**: pass an array (or list) of observations
+          directly via ``observations``.
+        * **Pre-loaded observations**: call ``load_observations_for_generation``
+          first and select a sequence by index via ``idx_observation``.
+
+        Parameters
+        ----------
+        environment_model : BaseEnvironmentModel or None, optional
+            If provided, observations are generated on-the-fly from the
+            environment model. Cannot be combined with ``observations`` or
+            ``idx_observation``.
+        NSteps : int or None, optional
+            Number of steps. Required when using ``environment_model``;
+            otherwise inferred from the observation array length.
+        observations : array-like or None, optional
+            Explicit observation sequence. Cannot be combined with
+            ``environment_model``.
+        idx_observation : int or None, optional
+            Index of a pre-loaded observation sequence. Cannot be combined
+            with ``environment_model``.
+        initial_state : dict or None, optional
+            Initial state dictionary passed to the environment model when
+            ``environment_model`` is provided.
+        verbose : bool, optional
+            Not used directly here; forwarded to the generator. Default
+            ``False``.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys ``'actions'``, ``'memories'``, and
+            ``'observations'``, each containing a NumPy array of length
+            ``NSteps``.
+
+        Raises
+        ------
+        ValueError
+            If the current mode is not ``'generation'``.
+        ValueError
+            If incompatible argument combinations are provided.
+        """
         if self.mode != 'generation':
             raise ValueError("Mode must be 'generation' to generate a trajectory.")
         
@@ -694,6 +1190,54 @@ class FSC:
                               idx_observation = None, NTraj = None,
                               initial_states = None,
                               verbose = False):
+        """
+        Generate multiple trajectories in ``'generation'`` mode.
+
+        The observation source follows the same three-way logic as
+        ``generate_single_trajectory``. When using pre-loaded observations
+        without specifying ``idx_observation``, one trajectory is produced per
+        loaded sequence. When specifying ``idx_observation``, ``NTraj``
+        independent trajectories are generated from the same sequence.
+
+        Parameters
+        ----------
+        environment_model : BaseEnvironmentModel or None, optional
+            Environment model for on-the-fly observation generation. Requires
+            ``NSteps`` and ``NTraj``.
+        obs_from_act : bool, optional
+            If ``True``, observations are generated as a function of the
+            actions taken (uses ``generate_trajectories_from_environment_obs_from_act``
+            internally). Only relevant when ``environment_model`` is provided.
+            Default ``False``.
+        NSteps : int or None, optional
+            Trajectory length. Required when using ``environment_model``.
+        observations : list of np.ndarray or np.ndarray or None, optional
+            Single or multiple observation sequences.
+        idx_observation : int or None, optional
+            Index of a pre-loaded observation sequence to use for all
+            trajectories.
+        NTraj : int or None, optional
+            Number of trajectories to generate. Required when
+            ``environment_model`` is provided or when ``idx_observation`` is
+            given.
+        initial_states : list of dict or None, optional
+            Per-trajectory initial states passed to the environment model.
+        verbose : bool, optional
+            If ``True``, print generation progress. Default ``False``.
+
+        Returns
+        -------
+        list of dict
+            List of trajectory dictionaries, each with keys ``'actions'``,
+            ``'memories'``, and ``'observations'``.
+
+        Raises
+        ------
+        ValueError
+            If the current mode is not ``'generation'``.
+        ValueError
+            If incompatible argument combinations are provided.
+        """
         if self.mode != 'generation':
             raise ValueError("Mode must be 'generation' to generate trajectories.")
         
@@ -760,6 +1304,34 @@ class FSC:
     ##############################################################################################################################
 
     def plot_losses(self, ax = None, figsize = (5, 3), return_ax = False):
+        """
+        Plot the training (and optional validation) negative log-likelihood
+        curves recorded during ``fit``.
+
+        A vertical dashed line marks the best epoch; when both MAPSO and
+        gradient descent were used, a second line marks the MAPSO–gradient
+        boundary.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes or None, optional
+            Axes object to draw on. A new figure is created when ``None``.
+        figsize : tuple, optional
+            Figure size when a new figure is created. Default ``(5, 3)``.
+        return_ax : bool, optional
+            If ``True``, return ``(fig, ax)``. Default ``False``.
+
+        Returns
+        -------
+        matplotlib.axes.Axes or (matplotlib.figure.Figure, matplotlib.axes.Axes)
+            The axes (and figure) used for the plot, only when
+            ``return_ax=True``.
+
+        Raises
+        ------
+        AssertionError
+            If the FSC has not been trained yet.
+        """
         assert self.trained, "The model has not been trained yet. Call the fit method to train the model."
 
         if ax is None:
@@ -872,7 +1444,35 @@ class FSC:
 
     def plot_bipartite_FSC(self, observation_node_colors,
                            memory_ordering = None,
-                           **kwargs):        
+                           **kwargs):
+        """
+        Plot the FSC as a bipartite network of memory nodes and action nodes.
+
+        In this layout each memory state and each (memory, action) pair appear
+        as nodes; edges represent memory transitions weighted by ``g(m'|a,m,y)``
+        and action choices weighted by ``pi(a|m)``. Observation-specific
+        sub-edges are shown as smaller nodes attached to each memory node.
+
+        Parameters
+        ----------
+        observation_node_colors : list
+            Colors for the observation indicator nodes. Length must equal ``Y``.
+        memory_ordering : list of int or None, optional
+            Permutation of memory state indices controlling the left-to-right
+            layout order. Uses default ordering when ``None``.
+        **kwargs
+            Additional keyword arguments forwarded to
+            ``utils.draw_bipartite_FSC_network``. Any default value (e.g.
+            ``spacing``, ``mem_node_size``, ``th_mem_transitions``) can be
+            overridden here.
+
+        Raises
+        ------
+        ValueError
+            If the current mode is not ``'generation'``.
+        AssertionError
+            If the length of ``observation_node_colors`` does not equal ``Y``.
+        """
         # Set sensible defaults
         defaults = {
             'th_mem_transitions': 1e-3,
@@ -1057,6 +1657,20 @@ class FSC:
     ##############################################################################################################################
 
     def __check_parameters_consistency(self, psi):
+        """
+        Validate that ``psi`` has the shape expected by the current
+        ``init_memory_obs_dependent`` setting.
+
+        Parameters
+        ----------
+        psi : np.ndarray or None
+            Logit vector to validate. Skipped when ``None``.
+
+        Raises
+        ------
+        ValueError
+            If ``psi`` has an incorrect shape.
+        """
         if self._init_memory_obs_dependent:
             if psi is not None:
                 if psi.shape != (self.Y, self.M):
@@ -1067,6 +1681,19 @@ class FSC:
                     raise ValueError("psi must have shape (M,) where M is the number of states.")
         
     def __check_and_init_observations(self, Y):
+        """
+        Validate that the number of observations ``Y`` is a positive integer.
+
+        Parameters
+        ----------
+        Y : int
+            Number of discrete observations.
+
+        Raises
+        ------
+        ValueError
+            If ``Y`` is ``None``, not positive, or not an integer.
+        """
         
         if Y is None:
             raise ValueError("Please provide the number of possible observations Y.")
@@ -1076,7 +1703,24 @@ class FSC:
             raise ValueError("Y must be an integer.")            
 
     def __init_generalized_policy_model(self, policy_model,
-                                        policy_params, seed):        
+                                        policy_params, seed):
+        """
+        Instantiate the generalized policy model (``self.GPModel``).
+
+        Parameters
+        ----------
+        policy_model : str
+            Name of the parametrization (e.g. ``'softmax'``).
+        policy_params : dict
+            Dictionary of initial parameter values.
+        seed : int or None
+            Random seed forwarded to the policy model constructor.
+
+        Raises
+        ------
+        ValueError
+            If ``policy_model`` is not in ``supported_policy_models``.
+        """
         if policy_model not in self.supported_policy_models:
             raise ValueError("Transition model not supported. Supported policy models are: " + ", ".join(self.supported_policy_models))
             
@@ -1090,6 +1734,10 @@ class FSC:
             raise ValueError("Transition model not supported for the given observation type.")
 
     def __init_supported_objects(self):
+        """
+        Populate the private lists of supported policy models, optimizers,
+        schedulers, and particle / velocity distributions.
+        """
         self.__supported_policy_models_discrete = ["softmax"]
 
         self.__supported_optimizers = ["ADAM", "SGD"]
@@ -1100,11 +1748,35 @@ class FSC:
 
 
     def __initialize_structure(self, M, A, Y):
+        """
+        Store the core FSC dimensions as instance attributes.
+
+        Parameters
+        ----------
+        M : int
+            Number of memory states.
+        A : int
+            Number of actions.
+        Y : int
+            Number of observations.
+        """
         self.M = M
         self.A = A
         self.Y = Y
 
     def __initialize_psi(self, seed):
+        """
+        Randomly initialize the logit vector ``psi`` for the initial memory
+        distribution.
+
+        Shape is ``(M,)`` when ``init_memory_obs_dependent=False``, or
+        ``(Y, M)`` when ``init_memory_obs_dependent=True``.
+
+        Parameters
+        ----------
+        seed : int or None
+            Random seed. Not applied when ``None``.
+        """
         if seed is not None:
             np.random.seed(seed)
         if self._init_memory_obs_dependent:
@@ -1113,6 +1785,15 @@ class FSC:
             self.psi = np.random.randn(self.M)
 
     def __check_ready_for_inference(self):
+        """
+        Assert that the FSC is properly configured and ready to run inference.
+
+        Raises
+        ------
+        ValueError
+            If the mode is not ``'inference'``, no trajectories have been
+            loaded, or the ``InferenceDiscreteObs`` object is missing.
+        """
         if self.mode != 'inference':
             raise ValueError("Mode must be 'inference' to perform inference.")
         if not self.__loaded_trajectories_inference:
@@ -1121,6 +1802,28 @@ class FSC:
             raise ValueError("Inferencer has not been initialized.")
         
     def __initialize_spaces(self, ObsSpace, ActSpace, MemSpace):
+        """
+        Initialize the observation, action, and memory label arrays.
+
+        When a custom space is provided, its length is validated against the
+        corresponding dimension (``Y``, ``A``, or ``M``). Otherwise the
+        internal integer index range is used.
+
+        Parameters
+        ----------
+        ObsSpace : array-like or None
+            Custom observation labels (length ``Y``).
+        ActSpace : array-like or None
+            Custom action labels (length ``A``).
+        MemSpace : array-like or None
+            Custom memory labels (length ``M``).
+
+        Raises
+        ------
+        ValueError
+            If any provided space has a length that does not match the
+            corresponding dimension.
+        """
         if ObsSpace is not None:
             if len(ObsSpace) != self.Y:
                 raise ValueError("The number of observations in ObsSpace must match the number of observations.")
@@ -1158,30 +1861,43 @@ class FSC:
 
     @property
     def supported_policy_models(self):
+        """List of supported policy parametrization names."""
         return self.__supported_policy_models_discrete
         
     @property
     def supported_optimizers(self):
+        """List of supported gradient-descent optimizer names."""
         return self.__supported_optimizers
     
     @property
     def supported_schedulers(self):
+        """List of supported learning-rate scheduler names."""
         return self.__supported_schedulers
     
     @property
     def supported_particle_distributions(self):
+        """List of supported initial particle distribution names for MAPSO."""
         return self.__supported_particle_distributions
     
     @property
     def supported_velocity_distributions(self):
+        """List of supported initial velocity distribution names for MAPSO."""
         return self.__supported_velocity_distributions
 
     @property
     def obs_type(self):
+        """Observation type. Always ``'discrete'`` for this class."""
         return "discrete"
     
     @property
-    def rho(self): 
+    def rho(self):
+        """
+        Initial memory distribution derived from ``psi`` via softmax.
+
+        Shape is ``(M,)`` when ``init_memory_obs_dependent=False``, or
+        ``(Y, M)`` when ``init_memory_obs_dependent=True``. Returns a
+        ``torch.Tensor`` when ``psi`` is a tensor, otherwise a NumPy array.
+        """
         if self._init_memory_obs_dependent:
             if isinstance(self.psi, torch.Tensor):
                 return nn.Softmax(dim=1)(self.psi)
@@ -1195,6 +1911,15 @@ class FSC:
     
     @property
     def trajectories_tofit(self):
+        """
+        The list of loaded inference trajectories as ``(observations, actions)``
+        tensor pairs.
+
+        Raises
+        ------
+        ValueError
+            If no trajectories have been loaded yet.
+        """
         if not self.__loaded_trajectories_inference:
             raise ValueError("No trajectories to fit have been loaded.")
 
@@ -1202,6 +1927,11 @@ class FSC:
         
     @property
     def policy_params(self):
+        """
+        Current policy parameters as a dictionary mapping parameter names to
+        their values (NumPy arrays in generation mode, tensors in inference
+        mode).
+        """
         param_dict = {}
 
         for key in self.GPModel.param_names:
@@ -1211,10 +1941,12 @@ class FSC:
         
     @property
     def policy_type(self):
+        """Human-readable name of the active generalized policy model."""
         return self.GPModel.name
     
     @property
     def trained(self):
+        """``True`` if the FSC has been successfully trained via ``fit``."""
         return self.__trained
 
     ##############################################################################################################################
