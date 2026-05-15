@@ -8,6 +8,12 @@ class GenerationDiscreteObs:
 
     def __init__(self, FSC):
         """
+        Initialize the generation backend for a discrete-observation FSC.
+
+        Parameters:
+        --- FSC: FSC
+            Parent FSC instance providing policy parameters, spaces, and
+            initialization settings.
         """
         self.FSC = FSC
 
@@ -18,15 +24,38 @@ class GenerationDiscreteObs:
     
     @property
     def TMat(self):
+        """Return the current joint transition matrix as a numpy array."""
         return self.FSC.GPModel.get_TMat_numpy()
     
     def get_TMat(self):
+        """
+        Return the current joint transition matrix.
+
+        Returns:
+        --- np.ndarray
+            Transition tensor with shape ``(Y, A, M, M)``.
+        """
         return self.FSC.GPModel.get_TMat_numpy()
     
     def get_memory_transition(self):
+        """
+        Return the memory transition component of the policy.
+
+        Returns:
+        --- np.ndarray
+            Memory transition tensor ``g(m' | a, m, y)`` with shape
+            ``(Y, A, M, M)``.
+        """
         return self.FSC.GPModel.get_memory_transition_numpy()
     
     def get_action_policy(self):
+        """
+        Return the marginal action policy.
+
+        Returns:
+        --- np.ndarray
+            Action policy matrix ``pi(a | m)`` with shape ``(M, A)``.
+        """
         return self.FSC.GPModel.get_action_policy_numpy()
 
     def load_observations(self, observations):
@@ -484,6 +513,31 @@ class GenerationDiscreteObs:
     
     def generate_trajectories_from_environment_obs_from_act(self, EModel,
                                                             NSteps, NTraj, initial_states=None):
+        """
+        Generate trajectories where observations are produced by an
+        environment model conditioned on the sampled action sequence.
+
+        This routine simulates FSC memory/action evolution jointly with
+        environment state transitions. It is only compatible with
+        observation-independent initial memory distributions.
+
+        Parameters:
+        --- EModel: BaseEnvironmentModel
+            Environment model implementing numba-compatible transition and
+            observation functions.
+        --- NSteps: int
+            Number of trajectory time steps.
+        --- NTraj: int
+            Number of trajectories to generate.
+        --- initial_states: list or np.ndarray or None (default = None)
+            Initial state per trajectory. If ``None``, states are sampled via
+            ``EModel.generate_initial_state``.
+
+        Returns:
+        --- trajectories: list of dict
+            Generated trajectories with keys ``actions``, ``memories``,
+            ``observations``, and ``states``.
+        """
         if self.FSC._init_memory_obs_dependent:
             raise ValueError("This method is not compatible with observation-dependent initial memory.")
         
@@ -553,6 +607,41 @@ class GenerationDiscreteObs:
                                                        initial_states,
                                                        state_shape,
                                                        NTraj, NSteps, MSpace, ASpace, rho):
+        """
+        Numba-parallel wrapper for environment-based trajectory generation.
+
+        Parameters:
+        --- fun_single_trj: callable
+            Numba-compiled function generating one trajectory.
+        --- piMat: np.ndarray
+            Action policy matrix.
+        --- gMat: np.ndarray
+            Memory transition tensor.
+        --- nb_generate_state: callable
+            Numba-compiled environment state transition function.
+        --- nb_generate_observation: callable
+            Numba-compiled environment observation function.
+        --- env_params: tuple or dict-like
+            Environment parameters consumed by the numba callbacks.
+        --- initial_states: np.ndarray
+            Array of initial states, one per trajectory.
+        --- state_shape: tuple
+            Shape of one environment state.
+        --- NTraj: int
+            Number of trajectories.
+        --- NSteps: int
+            Number of time steps.
+        --- MSpace: np.ndarray
+            Memory index space.
+        --- ASpace: np.ndarray
+            Action index space.
+        --- rho: np.ndarray
+            Initial memory distributions, one row per trajectory.
+
+        Returns:
+        --- tuple
+            ``(actions, memories, states, observations)`` arrays.
+        """
         
         actions = np.zeros((NTraj, NSteps), dtype = np.int32)
         memories = np.zeros((NTraj, NSteps), dtype = np.int32)
@@ -582,6 +671,38 @@ class GenerationDiscreteObs:
                                                          initial_state,
                                                          state_shape,
                                                          NSteps, MSpace, ASpace, rho):
+        """
+        Numba kernel generating one trajectory with environment-driven
+        observations.
+
+        Parameters:
+        --- piMat: np.ndarray
+            Action policy matrix.
+        --- gMat: np.ndarray
+            Memory transition tensor.
+        --- nb_generate_state: callable
+            Numba-compiled environment transition function.
+        --- nb_generate_observation: callable
+            Numba-compiled observation function.
+        --- env_params: tuple or dict-like
+            Environment parameters.
+        --- initial_state: np.ndarray
+            Initial environment state.
+        --- state_shape: tuple
+            Shape of one state.
+        --- NSteps: int
+            Number of trajectory steps.
+        --- MSpace: np.ndarray
+            Memory index space.
+        --- ASpace: np.ndarray
+            Action index space.
+        --- rho: np.ndarray
+            Initial memory distribution.
+
+        Returns:
+        --- tuple
+            ``(actions, memories, states, observations)`` for one trajectory.
+        """
         actions = np.zeros(NSteps, dtype = np.int32)
         memories = np.zeros(NSteps, dtype = np.int32)
         observations = np.zeros(NSteps, dtype = np.int32)
@@ -609,6 +730,27 @@ class GenerationDiscreteObs:
 
     def generate_trajectories_from_stateseq_obs_from_act(self, EModel,
                                                          state_seq, NTraj):
+        """
+        Generate trajectories using a fixed sequence of environment states.
+
+        Unlike ``generate_trajectories_from_environment_obs_from_act``, this
+        method does not sample state transitions: it receives a full state
+        sequence and only samples actions/memory transitions, while
+        observations are generated from each provided state transition.
+
+        Parameters:
+        --- EModel: BaseEnvironmentModel
+            Environment model providing the observation function.
+        --- state_seq: list or np.ndarray
+            Sequence of states of length ``NSteps + 1``.
+        --- NTraj: int
+            Number of trajectories to sample against the same state sequence.
+
+        Returns:
+        --- trajectories: list of dict
+            Generated trajectories with keys ``actions``, ``memories``,
+            ``observations``, and ``states``.
+        """
         if self.FSC._init_memory_obs_dependent:
             raise ValueError("This method is not compatible with observation-dependent initial memory.")
         
@@ -666,6 +808,39 @@ class GenerationDiscreteObs:
                                                        env_params,
                                                        state_shape,
                                                        NTraj, NSteps, MSpace, ASpace, rho):
+        """
+        Numba-parallel wrapper for fixed-state-sequence trajectory generation.
+
+        Parameters:
+        --- fun_single_trj: callable
+            Numba-compiled function generating one trajectory.
+        --- piMat: np.ndarray
+            Action policy matrix.
+        --- gMat: np.ndarray
+            Memory transition tensor.
+        --- state_seq: np.ndarray
+            Shared state sequence of length ``NSteps + 1``.
+        --- nb_generate_observation: callable
+            Numba-compiled environment observation function.
+        --- env_params: tuple or dict-like
+            Environment parameters.
+        --- state_shape: tuple
+            Shape of one environment state.
+        --- NTraj: int
+            Number of trajectories.
+        --- NSteps: int
+            Number of steps.
+        --- MSpace: np.ndarray
+            Memory index space.
+        --- ASpace: np.ndarray
+            Action index space.
+        --- rho: np.ndarray
+            Initial memory distributions, one per trajectory.
+
+        Returns:
+        --- tuple
+            ``(actions, memories, states, observations)`` arrays.
+        """
         
         actions = np.zeros((NTraj, NSteps), dtype = np.int32)
         memories = np.zeros((NTraj, NSteps), dtype = np.int32)
@@ -693,6 +868,35 @@ class GenerationDiscreteObs:
                                                     env_params,
                                                     state_shape,
                                                     NSteps, MSpace, ASpace, rho):
+        """
+        Numba kernel generating one trajectory over a provided state sequence.
+
+        Parameters:
+        --- piMat: np.ndarray
+            Action policy matrix.
+        --- gMat: np.ndarray
+            Memory transition tensor.
+        --- state_seq: np.ndarray
+            State sequence of length ``NSteps + 1``.
+        --- nb_generate_observation: callable
+            Numba-compiled observation function.
+        --- env_params: tuple or dict-like
+            Environment parameters.
+        --- state_shape: tuple
+            Shape of one environment state.
+        --- NSteps: int
+            Number of steps.
+        --- MSpace: np.ndarray
+            Memory index space.
+        --- ASpace: np.ndarray
+            Action index space.
+        --- rho: np.ndarray
+            Initial memory distribution.
+
+        Returns:
+        --- tuple
+            ``(actions, memories, states, observations)`` for one trajectory.
+        """
         actions = np.zeros(NSteps, dtype = np.int32)
         memories = np.zeros(NSteps, dtype = np.int32)
         observations = np.zeros(NSteps, dtype = np.int32)

@@ -89,6 +89,18 @@ def combine_spaces(space1, space2):
     return np.array(np.meshgrid(space1, space2)).T.reshape(-1, 2)
 
 def extract_durations(trajectory):
+    """
+    Compute run-length encoding of a 1-D trajectory.
+
+    Parameters:
+    --- trajectory: array-like
+        Sequence of discrete values.
+
+    Returns:
+    --- list of tuple
+        List ``[(value_0, duration_0), ..., (value_k, duration_k)]`` where
+        each duration is the length of a maximal contiguous run.
+    """
     durations = []
 
     current_value = trajectory[0]
@@ -106,9 +118,36 @@ def extract_durations(trajectory):
     return durations
 
 def filter_durations(durations, target_value):
+    """
+    Extract run lengths associated with a specific value.
+
+    Parameters:
+    --- durations: list of tuple
+        Output of ``extract_durations``.
+    --- target_value: int or float
+        Value whose run lengths are selected.
+
+    Returns:
+    --- np.ndarray
+        Array of run lengths for ``target_value``.
+    """
     return np.array([duration for value, duration in durations if value == target_value])
 
 def segment_trajectories(trajectory, label = "actions"):
+    """
+    Segment a labeled trajectory into contiguous index blocks per label value.
+
+    Parameters:
+    --- trajectory: dict
+        Trajectory dictionary containing at least ``trajectory[label]``.
+    --- label: str (default = "actions")
+        Key used to select the discrete sequence to segment.
+
+    Returns:
+    --- dict
+        Mapping ``label_value -> list of np.ndarray`` where each array
+        contains the indices of one contiguous segment.
+    """
     possible_actions = np.unique(trajectory[label])
     idxs = {action: np.where(trajectory[label] == action)[0] for action in possible_actions}
 
@@ -129,18 +168,57 @@ def segment_trajectories(trajectory, label = "actions"):
     return segmented_trajectory
 
 def get_cumulative(data):
+    """
+    Compute the empirical cumulative distribution function (CDF).
+
+    Parameters:
+    --- data: array-like
+        Sample values.
+
+    Returns:
+    --- values: np.ndarray
+        Sorted unique values.
+    --- cumulative: np.ndarray
+        Cumulative probabilities ``P(X <= values[i])``.
+    """
     values, counts = np.unique(data, return_counts=True)
     cumulative = np.cumsum(counts)
     cumulative = cumulative / cumulative[-1]  # Normalize the cumulative values
     return values, cumulative
 
 def get_inverse_cumulative(data):
+    """
+    Compute the empirical complementary cumulative distribution function.
+
+    Parameters:
+    --- data: array-like
+        Sample values.
+
+    Returns:
+    --- values: np.ndarray
+        Sorted unique values.
+    --- cumulative: np.ndarray
+        Tail probabilities ``P(X >= values[i])``.
+    """
     values, counts = np.unique(data, return_counts=True)
     cumulative = np.cumsum(counts[::-1])[::-1]
     cumulative = cumulative / cumulative[0]  # Normalize the cumulative values
     return values, cumulative
 
 def expcum_fit(x, a):
+    """
+    Exponential CDF model used for curve fitting.
+
+    Parameters:
+    --- x: array-like
+        Input values.
+    --- a: float
+        Exponential rate parameter.
+
+    Returns:
+    --- np.ndarray or float
+        ``1 - exp(-a * x)``.
+    """
     return 1 - np.exp(-a * x)
 
 @nb.njit
@@ -150,6 +228,38 @@ def nb_simulate_POMDP(nb_generate_state_transition,
                    nb_belief_update_function,
                    initial_belief, num_steps, initial_state, env_params,
                    reward_params, policy_params):
+    """
+    Numba-compiled simulator for one POMDP trajectory.
+
+    Parameters:
+    --- nb_generate_state_transition: callable
+        Numba-compatible state transition function.
+    --- nb_generate_observation: callable
+        Numba-compatible observation function.
+    --- nb_policy_function: callable
+        Policy function mapping belief to action.
+    --- nb_reward_function: callable
+        Reward function.
+    --- nb_belief_update_function: callable
+        Belief update function.
+    --- initial_belief: float
+        Initial belief value.
+    --- num_steps: int
+        Number of simulation steps.
+    --- initial_state: int
+        Initial latent state.
+    --- env_params: object
+        Environment parameters.
+    --- reward_params: object
+        Reward parameters.
+    --- policy_params: object
+        Policy parameters.
+
+    Returns:
+    --- tuple
+        ``(beliefs, actions, observations, states, rewards)`` arrays of
+        length ``num_steps``.
+    """
 
     beliefs = np.empty(num_steps)
     actions = np.empty(num_steps, dtype=np.int64)
@@ -179,6 +289,40 @@ def nb_generate_POMDP_trajectories(nb_generate_state_transition,
                                    nb_belief_update_function,
                                    NRep, NSteps, initial_beliefs, initial_states, env_params,
                                    reward_params, policy_params):
+    """
+    Numba-parallel simulator for multiple independent POMDP trajectories.
+
+    Parameters:
+    --- nb_generate_state_transition: callable
+        Numba-compatible state transition function.
+    --- nb_generate_observation: callable
+        Numba-compatible observation function.
+    --- nb_policy_function: callable
+        Policy function mapping belief to action.
+    --- nb_reward_function: callable
+        Reward function.
+    --- nb_belief_update_function: callable
+        Belief update function.
+    --- NRep: int
+        Number of trajectories.
+    --- NSteps: int
+        Number of steps per trajectory.
+    --- initial_beliefs: np.ndarray
+        Initial beliefs, one per trajectory.
+    --- initial_states: np.ndarray
+        Initial latent states, one per trajectory.
+    --- env_params: object
+        Environment parameters.
+    --- reward_params: object
+        Reward parameters.
+    --- policy_params: object
+        Policy parameters.
+
+    Returns:
+    --- tuple
+        Batched arrays ``(beliefs, actions, observations, states, rewards)``
+        each with leading dimension ``NRep``.
+    """
     beliefs = np.empty((NRep, NSteps))
     actions = np.empty((NRep, NSteps), dtype=np.int64)
     observations = np.empty((NRep, NSteps), dtype=np.int64)
@@ -204,6 +348,43 @@ def generate_POMDP_trajectories(env, nb_policy_function, nb_reward_function,
                                 ActSpace = None, StatesSpace = None, ObsSpace = None,
                                 reward_params = None, policy_params = None
                                 ):
+    """
+    Python wrapper to generate and optionally relabel multiple POMDP trajectories.
+
+    Parameters:
+    --- env: object
+        Environment object exposing numba callbacks and ``env.params``.
+    --- nb_policy_function: callable
+        Numba-compatible policy function.
+    --- nb_reward_function: callable
+        Numba-compatible reward function.
+    --- nb_belief_update_function: callable
+        Numba-compatible belief update function.
+    --- NRep: int
+        Number of trajectories.
+    --- NSteps: int
+        Number of steps per trajectory.
+    --- initial_beliefs: np.ndarray
+        Initial beliefs, one per trajectory.
+    --- initial_states: np.ndarray
+        Initial states, one per trajectory.
+    --- ActSpace: np.ndarray or None
+        Optional label mapping for action indices.
+    --- StatesSpace: np.ndarray or None
+        Optional label mapping for state indices.
+    --- ObsSpace: np.ndarray or None
+        Optional label mapping for observation indices.
+    --- reward_params: object or None
+        Reward parameters passed to the reward function.
+    --- policy_params: object or None
+        Policy parameters passed to the policy function.
+
+    Returns:
+    --- tuple
+        ``(beliefs, actions, observations, states, rewards)`` where actions,
+        observations, and states are returned as Python lists with optional
+        relabeling applied.
+    """
     env_params = env.params
     beliefs, actions, observations, states, rewards = nb_generate_POMDP_trajectories(
         env._nb_generate_state_transition,
@@ -2929,7 +3110,29 @@ def compute_memory_permutation_by_action_preference(action_probabilities):
 
 def find_chain_order_with_connectivity_awareness(adjacency_matrix, node_ids, action_probabilities):
     """
-    Find the best chain-like ordering considering connectivity strength and action preferences.
+    Find a chain-like ordering of nodes that balances connectivity and action
+    preference smoothness.
+
+    The function evaluates multiple candidate orderings (greedy from multiple
+    starts, reverse orderings, and degree-based ordering) against an internal
+    quality score that combines:
+    - reward for strong adjacent connections,
+    - penalty for strong skip-connections that bypass neighbors,
+    - bonus for smooth transitions in action-probability vectors.
+
+    Parameters:
+    --- adjacency_matrix: np.ndarray
+        Weighted adjacency matrix for the node subset being ordered.
+    --- node_ids: list
+        Original memory node identifiers corresponding to rows/columns in
+        ``adjacency_matrix``.
+    --- action_probabilities: np.ndarray or None
+        Full action-probability matrix used to encourage smooth policy
+        gradients along the chain. If ``None``, only connectivity is used.
+
+    Returns:
+    --- list
+        Ordered list of node IDs (same elements as ``node_ids``).
     """
     n = len(node_ids)
     if n <= 1:
@@ -2939,7 +3142,12 @@ def find_chain_order_with_connectivity_awareness(adjacency_matrix, node_ids, act
     symmetric_adj = adjacency_matrix + adjacency_matrix.T
     
     def evaluate_chain_quality_advanced(order):
-        """Enhanced evaluation that considers multiple factors"""
+        """
+        Score a candidate chain order (lower is better).
+
+        The score combines skip-connection penalties, adjacent-edge rewards,
+        and action-similarity bonuses.
+        """
         if len(order) != n:
             return float('inf')
         

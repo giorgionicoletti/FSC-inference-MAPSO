@@ -10,6 +10,16 @@ import MAPSO
 class InferenceDiscreteObs:
     def __init__(self, FSC):
         """
+        Initialize the inference backend for a discrete-observation FSC.
+
+        This constructor moves all FSC trainable quantities to the best
+        available torch device (CUDA, MPS, or CPU), converts numpy arrays to
+        tensors when needed, and wraps parameters in ``nn.Parameter`` if the
+        FSC is not already trained.
+
+        Parameters:
+        --- FSC: FSC
+            Parent FSC object configured for discrete observations.
         """
         self.FSC = FSC
 
@@ -47,15 +57,45 @@ class InferenceDiscreteObs:
         self.trained = False
 
     def get_policy_params(self):
+        """
+        Return the current policy parameters in model-defined order.
+
+        Returns:
+        --- tuple of torch.Tensor
+            Tuple ``(param_0, ..., param_k)`` matching
+            ``self.FSC.GPModel.param_names``.
+        """
         return tuple([self.FSC.GPModel.__getattribute__(param) for param in self.FSC.GPModel.param_names])
 
     def get_TMat(self):
+        """
+        Return the joint transition matrix used during inference.
+
+        Returns:
+        --- torch.Tensor
+            Transition tensor with shape ``(Y, A, M, M)``.
+        """
         return self.FSC.GPModel.get_TMat_torch()
     
     def get_memory_transition(self):
+        """
+        Return the memory transition component of the policy.
+
+        Returns:
+        --- torch.Tensor
+            Memory transition tensor ``g(m' | a, m, y)`` with shape
+            ``(Y, A, M, M)``.
+        """
         return self.FSC.GPModel.get_memory_transition_torch()
     
     def get_action_policy(self):
+        """
+        Return the marginal action policy.
+
+        Returns:
+        --- torch.Tensor
+            Action policy tensor ``pi(a | m)`` with shape ``(M, A)``.
+        """
         return self.FSC.GPModel.get_action_policy_torch()
 
 
@@ -251,6 +291,56 @@ class InferenceDiscreteObs:
                         sigma_min, sigma_max,
                         dynamic_topology, n_neighbors_init, n_neighbors_final, num_neighbors_mid,
                         verbose, verbose_epochs):
+        """
+        Optimize FSC parameters with MAPSO (Adaptive Particle Swarm).
+
+        This method builds a flattened parameter space containing all policy
+        parameters plus ``psi``, applies optional element-wise trainability
+        masks, initializes particle positions/velocities from the configured
+        distributions, and runs either global-best MAPSO or kNN-local MAPSO.
+
+        Parameters:
+        --- trainable_params: dict
+            Dictionary mapping parameter names (including ``psi``) to booleans
+            indicating whether each parameter block is trainable.
+        --- trainable_params_mask: dict
+            Optional element-wise masks. Values are either ``None`` or boolean
+            arrays with the same shape as the corresponding parameter.
+        --- n_particles: int
+            Number of particles in the swarm.
+        --- NEpochs: int
+            Number of MAPSO iterations.
+        --- init_particles: dict
+            Particle initialization settings (distribution and hyperparameters).
+        --- init_velocities: dict
+            Velocity initialization settings (distribution and hyperparameters).
+        --- c1_init: float
+            Initial cognitive coefficient.
+        --- c2_init: float
+            Initial social coefficient.
+        --- w_init: float
+            Initial inertia weight.
+        --- sigma_min: float
+            Minimum mutation scale used by MAPSO convergence strategy.
+        --- sigma_max: float
+            Maximum mutation scale used by MAPSO convergence strategy.
+        --- dynamic_topology: bool
+            If True, use kNN local-best topology; otherwise use global-best.
+        --- n_neighbors_init: int or None
+            Initial number of neighbors for dynamic topology.
+        --- n_neighbors_final: int or None
+            Final number of neighbors for dynamic topology.
+        --- num_neighbors_mid: int or None
+            Midpoint number of neighbors for dynamic topology.
+        --- verbose: bool
+            Print per-iteration diagnostics.
+        --- verbose_epochs: bool
+            Print per-epoch summary.
+
+        Returns:
+        --- np.ndarray
+            Best objective value at each MAPSO iteration.
+        """
         
         assert self.trajectories_loaded, "No trajectories have been loaded. Load trajectories with the load_trajectories method."
         assert not self.trained, "The model has already been trained. If you want to train it again, reinitialize it or set the flag self.trained to False."
@@ -400,6 +490,54 @@ class InferenceDiscreteObs:
                             train_split, optimizer, scheduler_dict,
                             maxiter, rho0, th, c_gauge,
                             verbose, verbose_epochs):
+        """
+        Optimize FSC parameters with gradient-based training.
+
+        Supports per-parameter learning rates, optional parameter masking, an
+        optional convex-concave optimization step for ``rho`` (when enabled),
+        mini-batch training, and optional validation split with best-epoch
+        model selection.
+
+        Parameters:
+        --- use_ccopt: bool
+            If True, update ``psi`` through convex-concave optimization of rho
+            at each batch (only for observation-independent initialization).
+        --- trainable_params: dict
+            Parameter-level trainability flags.
+        --- trainable_params_mask: dict
+            Optional element-wise trainability masks.
+        --- any_masked: bool
+            True if at least one element-wise mask is active.
+        --- NEpochs: int
+            Number of gradient epochs.
+        --- NBatch: int
+            Batch size in number of trajectories.
+        --- lr: float or dict
+            Global learning rate or per-parameter learning-rate dictionary.
+        --- train_split: float
+            Fraction of trajectories used for training.
+        --- optimizer: str
+            Optimizer name (expected: ``ADAM`` or ``SGD``).
+        --- scheduler_dict: dict
+            Scheduler configuration dictionary.
+        --- maxiter: int or None
+            Maximum iterations for ccopt.
+        --- rho0: np.ndarray or None
+            Initial rho for ccopt.
+        --- th: float or None
+            Convergence threshold for ccopt.
+        --- c_gauge: float or None
+            Additive gauge applied to ``log(rho)`` when reconstructing psi.
+        --- verbose: bool
+            Verbosity flag (kept for interface consistency).
+        --- verbose_epochs: bool
+            If True, print per-epoch losses and learning rate.
+
+        Returns:
+        --- tuple
+            ``(losses_train, losses_val)`` where validation losses are ``None``
+            when no validation split is used.
+        """
         assert self.trajectories_loaded, "No trajectories have been loaded. Load trajectories with the load_trajectories method."
         assert not self.trained, "The model has already been trained. If you want to train it again, reinitialize it or set the flag self.trained to False."
 
@@ -596,6 +734,27 @@ class InferenceDiscreteObs:
             return losses_train, None
 
     def optimize(self, inference_params, verbose, verbose_epochs):
+        """
+        Run the full inference pipeline according to ``inference_params``.
+
+        Depending on the configuration, this method executes MAPSO,
+        gradient-based optimization, or both in sequence. It aggregates loss
+        histories, computes ``best_loss``, and sets ``self.trained=True``.
+
+        Parameters:
+        --- inference_params: dict
+            Validated inference configuration produced by
+            ``FSC.set_inference_params``.
+        --- verbose: bool
+            Verbosity flag forwarded to optimization backends.
+        --- verbose_epochs: bool
+            If True, print per-epoch optimization updates.
+
+        Returns:
+        --- dict
+            Loss history dictionary containing at least ``train`` and
+            optionally ``MAPSO`` and ``val``.
+        """
         
         assert self.trajectories_loaded, "No trajectories have been loaded. Load trajectories with the load_trajectories method."
         assert not self.trained, "The model has already been trained. If you want to train it again, reinitialize it or set the flag self.trained to False."
@@ -696,12 +855,50 @@ class InferenceDiscreteObs:
         return loss_epochs
     
     def get_inferred_policy_params(self):
+        """
+        Return the current inferred policy parameters.
+
+        Returns:
+        --- list of torch.Tensor
+            Policy parameters in the order of
+            ``self.FSC.GPModel.param_names``.
+        """
         return [self.FSC.GPModel.__getattribute__(param) for param in self.FSC.GPModel.param_names]
 
 
     @staticmethod
     @nb.njit
     def optimize_rho(Y, M, A, TMat, pya, rhok, maxiter, th):
+        """
+        Numba-accelerated convex-concave fixed-point update for rho.
+
+        Given the current transition matrix and empirical start distribution
+        over observation-action pairs, iteratively updates ``rho`` until
+        convergence or the maximum number of iterations is reached.
+
+        Parameters:
+        --- Y: int
+            Number of observations.
+        --- M: int
+            Number of memory states.
+        --- A: int
+            Number of actions.
+        --- TMat: np.ndarray
+            Transition tensor with shape ``(Y, A, M, M)``.
+        --- pya: np.ndarray
+            Empirical start distribution over ``(y, a)`` with shape ``(Y, A)``.
+        --- rhok: np.ndarray
+            Current rho iterate with shape ``(M,)``.
+        --- maxiter: int
+            Maximum number of fixed-point iterations.
+        --- th: float
+            Convergence threshold on ``||rho_{k+1} - rho_k||``.
+
+        Returns:
+        --- tuple
+            ``(rho, err)`` where ``rho`` is the final iterate and ``err`` is
+            the final norm difference between consecutive iterates.
+        """
         TMat = np.transpose(TMat, (0, 2, 3, 1))
         wVec = np.zeros((Y, A, M))
         for y in range(Y):

@@ -125,6 +125,73 @@ def particle_swarm_optimization_discrete(nb_get_TMat_flat, trainable_mask,
                                          sigma_min = 0.1, sigma_max = 1.,
                                          verbose = True, verbose_epochs = True,
                                          init_memory_obs_dependent = False):
+    """
+    Modified Adaptive Particle Swarm Optimization (MAPSO) with a global-best
+    topology for FSC inference with discrete observations.
+
+    All particles share a single global best position (gbest). At each
+    iteration the inertia weight w and the acceleration coefficients c1, c2
+    are updated adaptively according to one of four strategies (S1–S4)
+    selected based on the normalized distance of the best particle from the
+    swarm centroid. When the convergence strategy (S3) is active, the global
+    best is randomly mutated to escape flat regions.
+
+    The last M entries of each particle (or Y*M when
+    init_memory_obs_dependent=True) encode the logit vector psi for the
+    initial memory distribution rho. Parameters marked as non-trainable via
+    trainable_mask are held fixed (initialized to +/-inf) and skipped during
+    velocity/position updates.
+
+    Parameters:
+    --- nb_get_TMat_flat: callable (numba njit)
+        Numba-compiled function that reconstructs the transition matrix TMat
+        of shape (Y, A, M, M) from a flat parameter vector.
+    --- trainable_mask: np.ndarray of bool, shape (n_dimensions,)
+        Boolean mask; True entries are updated during optimization.
+    --- n_dimensions: int
+        Total number of dimensions in the parameter space (policy params + psi).
+    --- n_particles: int
+        Number of particles in the swarm.
+    --- n_iterations: int
+        Number of PSO iterations.
+    --- M: int
+        Number of memory states.
+    --- A: int
+        Number of actions.
+    --- Y: int
+        Number of observations.
+    --- observations: list of np.ndarray
+        Observation sequences for all trajectories, in the internal index space.
+    --- actions: list of np.ndarray
+        Action sequences for all trajectories, in the internal index space.
+    --- init_particles: np.ndarray, shape (n_particles, n_dimensions)
+        Initial particle positions.
+    --- init_velocities: np.ndarray, shape (n_particles, n_dimensions)
+        Initial particle velocities.
+    --- c1: float (default 2.0)
+        Initial cognitive (personal-best) acceleration coefficient.
+    --- c2: float (default 2.0)
+        Initial social (global-best) acceleration coefficient.
+    --- w: float (default 0.9)
+        Initial inertia weight.
+    --- sigma_min: float (default 0.1)
+        Minimum standard deviation for the convergence-strategy mutation.
+    --- sigma_max: float (default 1.0)
+        Maximum standard deviation for the convergence-strategy mutation.
+    --- verbose: bool (default True)
+        If True, print per-iteration diagnostics (f value, strategy, c1, c2, w).
+    --- verbose_epochs: bool (default True)
+        If True, print the best fitness value at each iteration.
+    --- init_memory_obs_dependent: bool (default False)
+        If True, the last Y*M entries of each particle encode psi of shape
+        (Y, M); otherwise the last M entries encode psi of shape (M,).
+
+    Returns:
+    --- gbest_array: np.ndarray, shape (n_iterations, n_dimensions)
+        Global best position recorded at each iteration.
+    --- gbest_values_array: np.ndarray, shape (n_iterations,)
+        Global best fitness (mean negative log-likelihood) at each iteration.
+    """
 
     particles = init_particles
     velocities = init_velocities
@@ -282,11 +349,83 @@ def particle_swarm_optimization_discrete_kNN(nb_get_TMat_flat, trainable_mask,
                                              sigma_min = 0.1, sigma_max = 1.,
                                              verbose = True, verbose_epochs = True,
                                              init_memory_obs_dependent = False):
+    """
+    Modified Adaptive Particle Swarm Optimization (MAPSO) with a dynamic
+    local-best k-nearest-neighbours (kNN) topology for FSC inference with
+    discrete observations.
+
+    Unlike the global-best variant, each particle maintains its own local best
+    (lbest) computed from its k nearest neighbours in parameter space. The
+    neighbourhood size varies over time following a piecewise quartic schedule:
+    it grows from num_neighbors_init to num_neighbors_mid during the first half
+    of the run, then from num_neighbors_mid to num_neighbors_final during the
+    second half. This schedule promotes exploration early on and exploitation
+    later.
+
+    The inertia weight w and acceleration coefficients c1, c2 are updated
+    adaptively at each iteration using the same four-strategy MAPSO mechanism
+    as the global-best variant. When the convergence strategy (S3) is active,
+    both the per-particle local bests and the global best are mutated.
+
+    Parameters:
+    --- nb_get_TMat_flat: callable (numba njit)
+        Numba-compiled function that reconstructs the transition matrix TMat
+        of shape (Y, A, M, M) from a flat parameter vector.
+    --- trainable_mask: np.ndarray of bool, shape (n_dimensions,)
+        Boolean mask; True entries are updated during optimization.
+    --- n_dimensions: int
+        Total number of dimensions in the parameter space (policy params + psi).
+    --- n_particles: int
+        Number of particles in the swarm.
+    --- n_iterations: int
+        Number of PSO iterations.
+    --- M: int
+        Number of memory states.
+    --- A: int
+        Number of actions.
+    --- Y: int
+        Number of observations.
+    --- observations: list of np.ndarray
+        Observation sequences for all trajectories, in the internal index space.
+    --- actions: list of np.ndarray
+        Action sequences for all trajectories, in the internal index space.
+    --- init_particles: np.ndarray, shape (n_particles, n_dimensions)
+        Initial particle positions.
+    --- init_velocities: np.ndarray, shape (n_particles, n_dimensions)
+        Initial particle velocities.
+    --- num_neighbors_init: int
+        Initial neighbourhood size (first iteration).
+    --- num_neighbors_final: int
+        Final neighbourhood size (last iteration).
+    --- num_neighbors_mid: int
+        Neighbourhood size at the midpoint of the run.
+    --- c1: float (default 2.0)
+        Initial cognitive (personal-best) acceleration coefficient.
+    --- c2: float (default 2.0)
+        Initial social (local-best) acceleration coefficient.
+    --- w: float (default 0.9)
+        Initial inertia weight.
+    --- sigma_min: float (default 0.1)
+        Minimum standard deviation for the convergence-strategy mutation.
+    --- sigma_max: float (default 1.0)
+        Maximum standard deviation for the convergence-strategy mutation.
+    --- verbose: bool (default True)
+        If True, print per-iteration diagnostics.
+    --- verbose_epochs: bool (default True)
+        If True, print the best fitness value at each iteration.
+    --- init_memory_obs_dependent: bool (default False)
+        If True, the last Y*M entries of each particle encode psi of shape
+        (Y, M); otherwise the last M entries encode psi of shape (M,).
+
+    Returns:
+    --- gbest_array: np.ndarray, shape (n_iterations, n_dimensions)
+        Global best position recorded at each iteration.
+    --- gbest_values_array: np.ndarray, shape (n_iterations,)
+        Global best fitness (mean negative log-likelihood) at each iteration.
+    """
     particles = init_particles
     velocities = init_velocities
     pbest = particles.copy()
-
-    # print("Initialization", particles)
 
     gbest_array = np.zeros((n_iterations, n_dimensions), dtype=np.float64)
     gbest_values_array = np.zeros(n_iterations, dtype=np.float64)
@@ -481,6 +620,30 @@ def particle_swarm_optimization_discrete_kNN(nb_get_TMat_flat, trainable_mask,
 
 @nb.njit
 def nb_evaluate_nloglikelihood_flat_discrete(TMat, observations, actions, rho):
+    """
+    Compute the negative log-likelihood of a single trajectory given a
+    pre-built transition matrix and an initial memory distribution.
+
+    Implements the forward (alpha) pass of the FSC: at each time step the
+    unnormalized belief vector m is propagated through TMat, its norm is
+    accumulated into the log-likelihood, and m is renormalized to prevent
+    underflow. Returns nan as soon as the belief collapses to zero.
+
+    Parameters:
+    --- TMat: np.ndarray, shape (Y, A, M, M)
+        Joint transition matrix T[y, a, m, m'] = T(a, m' | m, y).
+    --- observations: np.ndarray of int, shape (T,)
+        Observation indices for the trajectory.
+    --- actions: np.ndarray of int, shape (T,)
+        Action indices for the trajectory.
+    --- rho: np.ndarray, shape (M,)
+        Initial memory distribution.
+
+    Returns:
+    --- float
+        Negative log-likelihood of the trajectory. Returns nan if the
+        belief vector reaches zero at any step.
+    """
     nLL = 0.
     m = np.zeros_like(rho)
 
@@ -519,6 +682,51 @@ def nb_evaluate_nloglikelihood_flat_discrete(TMat, observations, actions, rho):
 @nb.njit
 def fun_to_min_discrete(nb_get_TMat_flat, particle_pos, M, A, Y, observations, actions, init_memory_obs_dependent,
                         toprint = False):
+    """
+    Objective function evaluated by each PSO particle.
+
+    Unpacks the flat parameter vector into policy parameters and psi, builds
+    the transition matrix via nb_get_TMat_flat, and computes the mean negative
+    log-likelihood over all trajectories. Trajectories that produce a nan or
+    infinite likelihood are skipped; if any such trajectory is encountered the
+    function immediately returns with a compatibility flag.
+
+    The flat parameter vector is structured as follows:
+      - First entries: flattened policy parameters (theta, zeta, ...)
+      - Last M entries: logit vector psi for rho when
+        init_memory_obs_dependent=False.
+      - Last Y*M entries: flattened logit matrix psi for rho when
+        init_memory_obs_dependent=True.
+
+    Parameters:
+    --- nb_get_TMat_flat: callable (numba njit)
+        Numba-compiled function that reconstructs TMat from the policy
+        parameter slice of the flat vector.
+    --- particle_pos: np.ndarray, shape (n_dimensions,)
+        Current particle position (flattened parameter vector).
+    --- M: int
+        Number of memory states.
+    --- A: int
+        Number of actions.
+    --- Y: int
+        Number of observations.
+    --- observations: list of np.ndarray
+        Observation sequences for all trajectories.
+    --- actions: list of np.ndarray
+        Action sequences for all trajectories.
+    --- init_memory_obs_dependent: bool
+        If True, psi has shape (Y, M) and the last Y*M entries of the
+        particle encode it; otherwise psi has shape (M,).
+    --- toprint: bool (default False)
+        Reserved for debug printing; not currently used.
+
+    Returns:
+    --- nLL: float
+        Mean negative log-likelihood over compatible trajectories.
+    --- flag_uncompatible_traj: bool
+        True if at least one trajectory produced a nan/inf likelihood and
+        the evaluation was aborted early.
+    """
     if init_memory_obs_dependent:
         params = particle_pos[:-Y*M]
         params_psi = particle_pos[-Y*M:]

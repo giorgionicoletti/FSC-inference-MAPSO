@@ -1,7 +1,7 @@
 import numpy as np
 
 import sys
-sys.path.append('../modules')
+sys.path.append('../src/')
 import FSC as controller
 
 import os
